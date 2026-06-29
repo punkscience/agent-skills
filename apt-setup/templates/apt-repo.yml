@@ -1,0 +1,146 @@
+# APT repository publisher.
+#
+# Regenerates the signed APT repo on the `gh-pages` branch whenever a release is
+# published (or on manual dispatch). Downloads the release's .deb assets, builds
+# Packages + a VALID Release stanza, GPG-signs it, and commits to gh-pages.
+#
+# Placeholders to replace when installing this template:
+#   __OWNER__       GitHub org/user      (e.g. punkscience)
+#   __REPO__        repo name            (e.g. derpy)
+#   __PKG__         package name         (e.g. derpy)
+#   __ORIGIN__      repo Origin string   (e.g. Punk Science Studios Inc)
+#   __LABEL__       repo Label           (usually == __PKG__)
+#   __DESC__        one-line description
+#   __KEYRING__     served keyring file  (e.g. derpy-archive-keyring.gpg)
+#   __ARCHES__      space-separated      (e.g. amd64 arm64)
+#
+# CRITICAL — the Release file is ONE Debian control stanza. There must be NO
+# blank line between `Date:` and `MD5Sum:`, nor between the checksum sections.
+# A blank line splits the stanza; apt 3.x then binds no strong hash and fails
+# with "No Hash entry in Release file" / "provides only weak security
+# information". The printf headers below deliberately have NO leading '\n'.
+name: APT Repository
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  apt-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+
+      - name: Set up APT repo directories
+        run: |
+          mkdir -p apt/pool/main
+          for a in __ARCHES__; do
+            mkdir -p "apt/dists/stable/main/binary-$a"
+          done
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.release.tag_name }}" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download .deb artifacts from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="${{ steps.tag.outputs.tag }}"
+          VERSION="${RELEASE_TAG#v}"
+          echo "Version: $VERSION"
+          for a in __ARCHES__; do
+            gh release download "$RELEASE_TAG" \
+              --pattern "__PKG___${VERSION}_${a}.deb" \
+              --dir apt/pool/main --clobber
+          done
+
+      - name: Generate Packages files
+        run: |
+          cd apt
+          for a in __ARCHES__; do
+            dpkg-scanpackages --arch "$a" pool/ > "dists/stable/main/binary-$a/Packages"
+            # Strip non-standard fields dpkg-scanpackages may emit (e.g.
+            # Architecture-Variant) that confuse some apt versions.
+            sed -i '/^Architecture-Variant:/d' "dists/stable/main/binary-$a/Packages"
+            gzip -9c "dists/stable/main/binary-$a/Packages" > "dists/stable/main/binary-$a/Packages.gz"
+          done
+
+      - name: Generate Release file
+        run: |
+          set -e
+          cd apt/dists/stable
+          {
+            printf 'Origin: __ORIGIN__\n'
+            printf 'Label: __LABEL__\n'
+            printf 'Suite: stable\n'
+            printf 'Codename: stable\n'
+            printf 'Architectures: __ARCHES__\n'
+            printf 'Components: main\n'
+            printf 'Description: __DESC__\n'
+            printf 'Date: %s\n' "$(date -u +"%a, %d %b %Y %H:%M:%S UTC")"
+          } > Release
+          # No leading '\n' on these headers — see the CRITICAL note at the top.
+          emit_hashes() { # $1 = section header, $2 = hash command
+            printf '%s\n' "$1" >> Release
+            find . -type f \( -name Packages -o -name Packages.gz \) | sort | while read -r f; do
+              printf ' %s %s %s\n' "$($2 "$f" | cut -d' ' -f1)" "$(stat -c%s "$f")" "${f#./}"
+            done >> Release
+          }
+          emit_hashes "MD5Sum:" md5sum
+          emit_hashes "SHA1:"   sha1sum
+          emit_hashes "SHA256:" sha256sum
+          emit_hashes "SHA512:" sha512sum
+
+      - name: Sign Release file with GPG
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          set -e
+          if [ -z "$APT_SIGNING_KEY" ]; then
+            echo "::error::APT_SIGNING_KEY secret is not set. Run the apt-setup skill's"
+            echo "::error::key generation step and upload it with: gh secret set APT_SIGNING_KEY"
+            exit 1
+          fi
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')"
+          mkdir -p apt
+          # Serve a BINARY keyring (no --armor); signed-by wants binary.
+          gpg --batch --yes --export "$KEYID" > "apt/__KEYRING__"
+          cd apt/dists/stable
+          gpg --batch --yes --default-key "$KEYID" --clearsign -o InRelease Release
+          gpg --batch --yes --default-key "$KEYID" --detach-sign -o Release.gpg Release
+
+      - name: Copy install.sh to gh-pages root
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/__OWNER__/__REPO__/main/install.sh -o install.sh
+          chmod +x install.sh
+
+      - name: Commit and push to gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apt/ install.sh
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "apt: publish __PKG__ ${{ steps.tag.outputs.tag }}"
+            git push origin gh-pages
+          fi

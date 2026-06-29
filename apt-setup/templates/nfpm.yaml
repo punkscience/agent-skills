@@ -1,0 +1,25 @@
+# Standalone nfpm config for building a .deb when the project does NOT use
+# goreleaser. Install nfpm (https://nfpm.goreleaser.com), build your Linux
+# binaries first, then:
+#
+#   ARCH=amd64 nfpm package -f nfpm.yaml -p deb -t "dist/__PKG___${VERSION}_amd64.deb"
+#   ARCH=arm64 nfpm package -f nfpm.yaml -p deb -t "dist/__PKG___${VERSION}_arm64.deb"
+#
+# The file_name must match what apt-repo.yml downloads:  __PKG___<version>_<arch>.deb
+#
+# Placeholders: __PKG__ __VENDOR__ __MAINTAINER__ __HOMEPAGE__ __DESC__ __LICENSE__
+name: __PKG__
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: __MAINTAINER__
+description: __DESC__
+vendor: __VENDOR__
+homepage: __HOMEPAGE__
+license: __LICENSE__
+contents:
+  # Point src at the per-arch binary you built. Adjust paths to your build output.
+  - src: ./build/${ARCH}/__PKG__
+    dst: /usr/bin/__PKG__

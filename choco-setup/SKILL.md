@@ -133,15 +133,19 @@ account. The skill **cannot** create the account or read the key for the user.
    to proceed, offering: (a) the user pastes a key they already have, (b) the user
    creates an account at https://community.chocolatey.org/ → Account → API Keys and
    pastes the key, or (c) defer publishing (set everything up, skip the live push).
-3. When the user provides the key, set it as the repo secret **without it ever
-   touching the shell history or a file**:
+3. When the user provides the key, tell them run this command **in their own
+   terminal** (not through the agent):
    ```bash
-   gh secret set CHOCOLATEY_API_KEY --app actions   # then paste when prompted
+   gh secret set CHOCOLATEY_API_KEY --app actions
+   # Paste the key when prompted. The key MUST NOT go through the chat or agent.
    ```
-   (Prefer the interactive prompt — `gh` reads stdin so the key isn't an argv
-   value. Never `echo "$KEY" | gh ...` into a logged command, never write the key
-   to disk, never commit it.)
-4. If `gh` lacks permission to set secrets, fall back to one instruction: "add a
+   The interactive prompt is safe because `gh` reads stdin directly — the key
+   never hits argv or shell history. The agent's bash tool cannot provide TTY
+   input to interactive prompts, so the user must run this themselves.
+4. If the user pastes the key into chat despite the warning, pipe it to `gh secret
+   set` via stdin (the value will appear in the tool call but at least not on
+   disk or in shell history). Never write the key to a file. Never commit it.
+5. If `gh` lacks permission to set secrets, fall back to one instruction: "add a
    repo secret named `CHOCOLATEY_API_KEY` under Settings → Secrets and variables →
    Actions". Do not store the value yourself.
 
@@ -211,9 +215,21 @@ The script:
 4. `choco uninstall <pkg> -y` to clean up; reports `PASS:` only if every step
    succeeded.
 
+**Elevation required.** `choco install` needs admin rights. The agent cannot
+UAC-elevate. When running through the agent, fall back to manual verification:
+
+1. `choco pack` — verify it produces a `.nupkg`.
+2. Download the release zip, verify its SHA256 against `checksums.txt`, extract,
+   and run the binary — confirm it executes.
+
 If the install step needs a real release to download from, run Phase 8's release
-first (or point the script at a published tag). Only after `PASS:` do you report
-success.
+first (or point the script at a published tag). Temporarily replace the placeholder
+URLs and checksums in `chocolateyInstall.ps1` with the real tag's values before
+running the verify script. Revert to placeholders before committing.
+
+**The `--version` flag.** Not every CLI supports `--version` — cobra apps in
+particular don't add it by default. If `<pkg> --version` fails, try
+`-VersionArg '--help'` or `-VersionArg ''` with the verify script.
 
 ---
 
@@ -275,11 +291,22 @@ gh run watch <run-id> --exit-status
   cleanup) so uninstall is clean.
 - **`workflow_dispatch` uses the default-branch workflow definition.** Fixes to the
   publisher must reach the default branch before a dispatch republishes correctly.
-- **Never echo or persist the API key.** Set it via `gh secret set` with an
-  interactive prompt; in CI it's `${{ secrets.CHOCOLATEY_API_KEY }}`. It must never
-  appear in argv, logs, files, or commits.
+- **Never echo or persist the API key.** Tell the user to run `gh secret set` in
+  their own terminal — interactive TTY input doesn't work through the agent's bash
+  tool. If the user pastes the key into chat anyway, pipe via stdin (never write
+  to a file, never put on argv).
 - **`choco pack`/`choco install` need elevation/Windows.** Verification is a
-  Windows-only step; there is no cross-platform shortcut. Run it natively.
+  Windows-only step; there is no cross-platform shortcut. The agent can't
+  UAC-elevate — fall back to `choco pack` + manual download/checksum/binary-run.
+- **`grep` fails under `set -e -o pipefail` when there are no matches.** The
+  publisher's `ARM64_SHA=$(grep ... | awk ...)` will kill the script if the
+  release has no arm64 archive. Always append `|| true` to the arm64 grep, and
+  add a fallback: `if [ -z "$ARM64_SHA" ]; then ARM64_SHA="$AMD64_SHA"; fi`.
+- **Not every CLI supports `--version`.** Cobra apps don't add it by default. If
+  the verify script's default `--version` arg fails, try `-VersionArg '--help'`.
+- **`sed -i` on Windows (Git Bash) works correctly in CI** — the inline-edit
+  patterns used in the publisher have been verified on `windows-latest` runners.
+  No backup-file workarounds needed.
 
 ## Files in this skill
 

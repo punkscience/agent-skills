@@ -49,11 +49,19 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
 
           AMD64_SHA=$(grep "windows_amd64.zip" checksums.txt | awk '{print $1}')
-          ARM64_SHA=$(grep "windows_arm64.zip" checksums.txt | awk '{print $1}')
+          # || true: grep returns 1 when arm64 archive is absent, which would
+          # kill the script under set -e -o pipefail.
+          ARM64_SHA=$(grep "windows_arm64.zip" checksums.txt | awk '{print $1}' || true)
           echo "==> Version: $VERSION"
           echo "==> amd64 SHA256: $AMD64_SHA"
           echo "==> arm64 SHA256: $ARM64_SHA"
           if [ -z "$AMD64_SHA" ]; then echo "::error::no amd64 checksum found"; exit 1; fi
+
+          # Fallback: if no arm64 archive, use amd64 (Windows on ARM runs x64 via emulation).
+          if [ -z "$ARM64_SHA" ]; then
+            ARM64_SHA="$AMD64_SHA"
+            echo "==> (no arm64 archive — falling back to amd64 checksum)"
+          fi
 
           # nuspec: version + release-notes tag
           sed -i "s|<version>[0-9][0-9.]*</version>|<version>${VERSION}</version>|" chocolatey/__PKG__.nuspec
